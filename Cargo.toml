@@ -1,0 +1,7 @@
+[package]
+name = "fdpoll"
+version = "0.1.0"
+authors = [ "mahkoh" ]
+
+[[lib]]
+name = "fdpoll"
