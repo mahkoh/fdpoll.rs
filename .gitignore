@@ -2,5 +2,4 @@
 doc
 bin
 target
-examples
 !.gitignore

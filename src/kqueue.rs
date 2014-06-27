@@ -273,21 +273,3 @@ impl Drop for FDPoll {
         self.sem.release();
     }
 }
-
-trait SetCapacity {
-    fn set_capacity(&mut self, n: uint);
-}
-
-impl<T> SetCapacity for Vec<T> {
-    fn set_capacity(&mut self, n: uint) {
-        if n >= self.capacity() {
-            self.reserve(n);
-            return;
-        }
-        self.truncate(n);
-        let real_len = self.len();
-        unsafe { self.set_len(n); }
-        self.shrink_to_fit();
-        unsafe { self.set_len(real_len); }
-    }
-}
