@@ -2,6 +2,8 @@
 
 A library for integrating file descriptors into Rust's select pattern.
 
+Currently Linux and BSD (untested) are supported via epoll and kqueue.
+
 [Documentation](https://mahkoh.github.io/fdpoll/doc/fdpoll)
 
 #### Example
