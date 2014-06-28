@@ -16,6 +16,7 @@ static EVFILT_WRITE: c_short = -2;
 static EV_ADD: c_short = 1;
 static EV_DELETE: c_short = 2;
 
+// For testing with libkqueue on linux.
 #[cfg(target_os = "linux")]
 #[cfg(target_os = "android")]
 static O_NONBLOCK: c_int = 0o4000;
@@ -85,12 +86,12 @@ impl kevent {
 
     /// Returns if the file descriptor is readable.
     pub fn read(&self) -> bool {
-        self.filter & EVFILT_READ != 0
+        self.filter == EVFILT_READ
     }
 
     /// Returns if the file descriptor is writable.
     pub fn write(&self) -> bool {
-        self.filter & EVFILT_WRITE != 0
+        self.filter == EVFILT_WRITE
     }
 }
 
