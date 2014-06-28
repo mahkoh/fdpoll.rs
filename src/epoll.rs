@@ -21,7 +21,7 @@ static EFD_NONBLOCK: c_int = 2048;
 #[repr(C)]
 #[allow(non_camel_case_types)]
 struct epoll_data {
-    pub data: [u64, ..1u],
+    data: [u64, ..1u],
 }
 
 impl epoll_data {
@@ -41,7 +41,7 @@ struct epoll_event {
     data: epoll_data,
 }
 
-extern "C" {
+extern {
     fn epoll_create1(flags: c_int) -> c_int;
     fn epoll_ctl(epfd: c_int, op: c_int, fd: c_int, event: *mut epoll_event) -> c_int;
     fn epoll_wait(epfd: c_int, events: *mut epoll_event, maxevents: c_int,
@@ -66,6 +66,8 @@ pub enum Error {
     DoesntExist,
     /// The file descriptor doesn't support this operation.
     Unsupported,
+    /// The process doesn't have the permission to perform this action.
+    NoPermission,
 }
 
 /// Watch types.
@@ -190,12 +192,8 @@ impl FDPoll {
                     -1 => snd.send(Err(Signal)),
                     n => {
                         unsafe { events2.set_len(n as uint); }
-                        if events2.mut_iter().any(|e| unsafe { *e.data.fd() } == abort2) {
-                            unsafe {
-                                let mut buf = [0u8, ..8];
-                                read(abort2, buf.as_mut_ptr() as *mut _, 8);
-                            }
-                        } else {
+                        let mut buf: [u8, ..8] = unsafe { uninitialized() };
+                        if unsafe { read(abort2, buf.as_mut_ptr() as *mut _, 8) <= 0 } {
                             snd.send(Ok(()));
                         }
                     }

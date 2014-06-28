@@ -1,84 +1,96 @@
 extern crate libc;
 
-use libc::{c_int, c_uint, close, read, write};
-use libc::consts::os::posix88::{EEXIST, EBADF, ENOENT, EPERM};
-use std::mem::{transmute, uninitialized};
+use libc::{c_void, c_int, c_uint, intptr_t, uintptr_t, c_short, timespec, close, read,
+           write, pipe};
+use libc::consts::os::posix88::{EBADF, ENOENT, EACCES};
+use std::mem::{uninitialized, zeroed};
 use std::os::{errno};
 use std::sync::{Arc, RWLock, RWLockReadGuard, Semaphore};
 use std::sync::atomics::{AtomicBool, Relaxed};
 use std::task::{TaskBuilder};
 use native::task::{NativeTaskBuilder};
 
-static EPOLLIN: c_int = 1;
-static EPOLLOUT: c_int = 4;
+static EVFILT_READ: c_short = -1;
+static EVFILT_WRITE: c_short = -2;
 
-static EPOLL_CTL_ADD: c_int = 1;
-static EPOLL_CTL_DEL: c_int = 2;
-static EPOLL_CTL_MOD: c_int = 3;
+static EV_ADD: c_short = 1;
+static EV_DELETE: c_short = 2;
 
-static EFD_NONBLOCK: c_int = 2048;
-
-#[repr(C)]
-#[allow(non_camel_case_types)]
-struct epoll_data {
-    pub data: [u64, ..1u],
-}
-
-impl epoll_data {
-    fn fd(&self) -> *c_int {
-        unsafe { transmute(self) }
-    }
-
-    fn fd_mut(&mut self) -> *mut c_int {
-        unsafe { transmute(self) }
-    }
-}
+#[cfg(target_os = "linux")]
+#[cfg(target_os = "android")]
+static O_NONBLOCK: c_int = 0o4000;
+#[cfg(target_os = "macos")]
+#[cfg(target_os = "ios")]
+#[cfg(target_os = "freebsd")]
+static O_NONBLOCK: c_int = 4;
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
-struct epoll_event {
-    events: u32,
-    data: epoll_data,
+struct kevent {
+    ident:  uintptr_t,   /* identifier for this event */
+    filter: c_short,     /* filter for event */
+    flags:  c_short,     /* action flags for kqueue*/
+    fflags: c_uint,      /* filter flag value */
+    data:   intptr_t,    /* filter data value */
+    udata:  *mut c_void, /* opaque user data identifier */
 }
 
-extern "C" {
-    fn epoll_create1(flags: c_int) -> c_int;
-    fn epoll_ctl(epfd: c_int, op: c_int, fd: c_int, event: *mut epoll_event) -> c_int;
-    fn epoll_wait(epfd: c_int, events: *mut epoll_event, maxevents: c_int,
-                  timeout: c_int) -> c_int;
-    fn eventfd(initval: c_uint, flags: c_int) -> c_int;
+#[link(name="kqueue")]
+extern {
+    fn kqueue() -> c_int;
+    fn kevent(kq: c_int, changelist: *kevent, nchanges: c_int, eventlist: *mut kevent,
+              nevents: c_int, timeout: *timespec) -> c_int;
+    fn pipe2(filedes: *mut [c_int, ..2], flags: c_int) -> c_int;
 }
 
 #[deriving(Show)]
+/// Possible errors.
 pub enum Error {
+    /// Modification of the set failed because it's currently waiting for events.
     Waiting,
+    /// Out of resources or some other error not specified here.
     Resources,
+    /// `wait` was interrupted by a signal.
     Signal,
+    /// Invalid file descriptor.
     BadFD,
+    /// `add` was called with a file descriptor already in the set.
     Exists,
+    /// `move` or `del` was called with a file descriptor not in the set.
     DoesntExist,
+    /// The file descriptor doesn't support this operation.
     Unsupported,
+    /// The process doesn't have the permission to perform this action.
+    NoPermission,
 }
 
+/// Watch types.
 pub enum Type {
-    Read = EPOLLIN,
-    Write = EPOLLOUT,
-    ReadWrite = EPOLLIN | EPOLLOUT,
+    /// Wait for the descriptor to become read-ready.
+    Read,
+    /// Wait for the descriptor to become write-ready.
+    Write,
+    /// Wait for the descriptor to become write- or read-ready.
+    ReadWrite,
 }
 
-pub type Event = epoll_event;
+/// A single event.
+pub type Event = kevent;
 
-impl epoll_event {
+impl kevent {
+    /// Returns the file descriptor of this event.
     pub fn fd(&self) -> c_int {
-        unsafe { *self.data.fd() }
+        self.ident as c_int
     }
 
+    /// Returns if the file descriptor is readable.
     pub fn read(&self) -> bool {
-        self.events & (EPOLLIN as u32) != 0
+        self.filter & EVFILT_READ != 0
     }
 
+    /// Returns if the file descriptor is writable.
     pub fn write(&self) -> bool {
-        self.events & (EPOLLOUT as u32) != 0
+        self.filter & EVFILT_WRITE != 0
     }
 }
 
@@ -92,16 +104,19 @@ impl Drop for FD {
     }
 }
 
+/// Container for the events made available by the last wait.
 pub struct Events<'a> {
     lock: RWLockReadGuard<'a, Vec<Event>>,
 }
 
 impl<'a> Events<'a> {
+    /// Get the events create by the last wait.
     pub fn slice<'b>(&'b self) -> &'b [Event] {
         self.lock.as_slice()
     }
 }
 
+/// Poll set.
 pub struct FDPoll {
     pub rcv: Receiver<Result<(), Error>>,
 
@@ -114,25 +129,37 @@ pub struct FDPoll {
 }
 
 impl FDPoll {
+    /// Create a new set that can handle at most `max` events at the same time.
+    ///
+    /// Note that you can add arbitrarily many file descriptors to the set (as far as the
+    /// operating system allows,) but every `wait()` stores at most `max` events.
+    /// 
+    /// Returns `Err` if the underlying structure couldn't be created.
     pub fn new(max: uint) -> Result<FDPoll, Error> {
         // Create epoll
-        let epfd = match unsafe { epoll_create1(0) } {
+        let epfd = match unsafe { kqueue() } {
             -1 => return Err(Resources),
             n => FD { fd: n },
         };
 
         // Create abort
-        let abort = match unsafe { eventfd(0, EFD_NONBLOCK) } {
+        let mut pipe = [0, 0]; 
+        let read_end;
+        let write_end;
+        match unsafe { pipe2(&mut pipe, O_NONBLOCK) } {
             -1 => return Err(Resources),
-            n => FD { fd: n },
-        };
+            _ => {
+                read_end = FD { fd: pipe[0] };
+                write_end = FD { fd: pipe[1] };
+            },
+        }
 
         // Register abort
-        let mut e: Event = unsafe { uninitialized() };
-        unsafe { *e.data.fd_mut() = abort.fd; }
-        e.events = EPOLLIN as u32;
-        if unsafe { epoll_ctl(epfd.fd, EPOLL_CTL_ADD, abort.fd,
-                              &mut e as *mut _) } == -1 {
+        let mut e: Event = unsafe { zeroed() };
+        e.ident = read_end.fd as uintptr_t;
+        e.filter = EVFILT_READ;
+        e.flags = EV_ADD;
+        if unsafe { kevent(epfd.fd, &e as *_, 1, 0 as *mut _, 0, 0 as *_) == -1 } {
             return Err(Resources);
         }
 
@@ -146,7 +173,6 @@ impl FDPoll {
         let events2  = events.clone();
         let running2 = running.clone();
         let stop2    = stop.clone();
-        let abort2   = abort.fd;
         let epfd2    = epfd.fd;
         TaskBuilder::new().native().spawn(proc() {
             loop {
@@ -158,20 +184,20 @@ impl FDPoll {
                 let mut events2 = events2.write();
                 unsafe { events2.set_len(0); }
                 let r = unsafe {
-                    epoll_wait(epfd2, events2.as_mut_ptr(), events2.capacity() as i32, -1)
+                    kevent(epfd2, 0 as *_, 0, events2.as_mut_ptr(),
+                           events2.capacity() as c_int, 0 as *_)
                 };
                 running2.store(false, Relaxed);
                 match r {
                     -1 => snd.send(Err(Signal)),
                     n => {
                         unsafe { events2.set_len(n as uint); }
-                        if events2.mut_iter().any(|e| unsafe { *e.data.fd() } == abort2) {
-                            unsafe {
-                                let mut buf = [0u8, ..8];
-                                read(abort2, buf.as_mut_ptr() as *mut _, 8);
-                            }
-                        } else {
+                        let mut buf: [u8, ..8] = unsafe { uninitialized() };
+                        let ptr = buf.as_mut_ptr() as *mut _;
+                        if unsafe { read(read_end.fd, ptr, 8) <= 0 } {
                             snd.send(Ok(()));
+                        } else {
+                            while unsafe { read(read_end.fd, ptr, 8) > 0 } { }
                         }
                     }
                 }
@@ -183,23 +209,29 @@ impl FDPoll {
             sem: sem,
             epfd: epfd,
             events: events,
-            abort: abort,
+            abort: write_end,
             stop: stop,
             rcv: rcv,
         })
     }
 
+    /// Abort the current `wait()`.
+    /// 
+    /// Returns `Err` if `wait()` isn't running.
     pub fn abort(&self) -> Result<(), ()> {
         if !self.running.load(Relaxed) {
             return Err(());
         }
         unsafe {
-            let buf = 1u64;
-            write(self.abort.fd, &buf as *_ as *_, 8);
+            let buf = [0u8];
+            write(self.abort.fd, buf.as_ptr() as *_, 1);
         }
         Ok(())
     }
 
+    /// Return the container containing the events generated by the last `wait()`.
+    ///
+    /// Returns `Err` if `wait()` is currently running.
     pub fn events<'a>(&'a self) -> Result<Events<'a>, ()> {
         if self.running.load(Relaxed) {
             return Err(());
@@ -207,6 +239,9 @@ impl FDPoll {
         Ok(Events { lock: self.events.read() })
     }
 
+    /// Start the wait process.
+    ///
+    /// Returns `Err` if `wait()` is currently running.
     pub fn wait(&self) -> Result<(), ()> {
         if self.running.load(Relaxed) {
             return Err(());
@@ -215,19 +250,32 @@ impl FDPoll {
         Ok(())
     }
 
+    /// Add a file descriptor to the set.
+    ///
+    /// Returns `Err` if `wait()` is currently running or if an underlying error occurs.
     pub fn add(&self, fd: c_int, ty: Type) -> Result<(), Error> {
         if self.running.load(Relaxed) {
             return Err(Waiting);
         }
-        let mut e: Event = unsafe { uninitialized() };
-        unsafe { *e.data.fd_mut() = fd };
-        e.events = ty as u32;
-        match unsafe { epoll_ctl(self.epfd.fd, EPOLL_CTL_ADD, fd, &mut e as *mut _) } {
+        let mut e: [Event, ..2] = unsafe { uninitialized() };
+        e[0].ident = fd as uintptr_t;
+        e[0].filter = EVFILT_READ;
+        e[0].flags = EV_ADD;
+        e[1].ident = fd as uintptr_t;
+        e[1].filter = EVFILT_WRITE;
+        e[1].flags = EV_ADD;
+        let (ptr, len) = unsafe {
+            match ty {
+                Read      => (e.as_ptr(),           1),
+                Write     => (e.as_ptr().offset(1), 1),
+                ReadWrite => (e.as_ptr(),           2),
+            }
+        };
+        match unsafe { kevent(self.epfd.fd, ptr, len, 0 as *mut _, 0, 0 as *_) } {
             -1 => {
                 match errno() as i32 {
                     EBADF => Err(BadFD),
-                    EEXIST => Err(Exists),
-                    EPERM => Err(Unsupported),
+                    EACCES => Err(NoPermission),
                     _ => Err(Resources),
                 }
             },
@@ -235,34 +283,41 @@ impl FDPoll {
         }
     }
 
+    /// Modify a file descriptor in the set.
+    ///
+    /// Returns `Err` if `wait()` is currently running or if an underlying error occurs.
     pub fn modify(&self, fd: c_int, ty: Type) -> Result<(), Error> {
-        if self.running.load(Relaxed) {
-            return Err(Waiting);
-        }
-        let mut e: Event = unsafe { uninitialized() };
-        unsafe { *e.data.fd_mut() = fd };
-        e.events = ty as u32;
-        match unsafe { epoll_ctl(self.epfd.fd, EPOLL_CTL_MOD, fd, &mut e as *mut _) } {
-            -1 => match errno() as i32 {
-                EBADF => Err(BadFD),
-                ENOENT => Err(DoesntExist),
-                _ => Err(Resources),
-            },
-            _ => Ok(()),
-        }
+        self.add(fd, ty)
     }
 
+    /// Remove a file descriptor from the set.
+    ///
+    /// Returns `Err` if `wait()` is currently running or if an underlying error occurs.
     pub fn delete(&self, fd: c_int) -> Result<(), Error> {
         if self.running.load(Relaxed) {
             return Err(Waiting);
         }
-        match unsafe { epoll_ctl(self.epfd.fd, EPOLL_CTL_DEL, fd, 0 as *mut _) } {
+        let mut not_found = false;
+        let mut e: [Event, ..1] = unsafe { uninitialized() };
+        e[0].ident = fd as uintptr_t;
+        e[0].filter = EVFILT_READ;
+        e[0].flags = EV_DELETE;
+        match unsafe { kevent(self.epfd.fd, e.as_ptr(), 1, 0 as *mut _, 0, 0 as *_) } {
+            -1 => match errno() as i32 {
+                EBADF => return Err(BadFD),
+                ENOENT => not_found = true,
+                _ => return Err(Resources),
+            },
+            _ => { },
+        }
+        e[0].filter = EVFILT_WRITE;
+        match unsafe { kevent(self.epfd.fd, e.as_ptr(), 1, 0 as *mut _, 0, 0 as *_) } {
             -1 => match errno() as i32 {
                 EBADF => Err(BadFD),
-                ENOENT => Err(DoesntExist),
+                ENOENT if not_found => Err(DoesntExist),
                 _ => Err(Resources),
             },
-            _ => Ok(()),
+            _ => Ok(())
         }
     }
 }
