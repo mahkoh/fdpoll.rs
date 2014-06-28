@@ -36,7 +36,19 @@ struct kevent {
     udata:  *mut c_void, /* opaque user data identifier */
 }
 
+#[cfg(target_os = "linux")]
+#[cfg(target_os = "android")]
 #[link(name="kqueue")]
+extern {
+    fn kqueue() -> c_int;
+    fn kevent(kq: c_int, changelist: *kevent, nchanges: c_int, eventlist: *mut kevent,
+              nevents: c_int, timeout: *timespec) -> c_int;
+    fn pipe2(filedes: *mut [c_int, ..2], flags: c_int) -> c_int;
+}
+
+#[cfg(target_os = "macos")]
+#[cfg(target_os = "ios")]
+#[cfg(target_os = "freebsd")]
 extern {
     fn kqueue() -> c_int;
     fn kevent(kq: c_int, changelist: *kevent, nchanges: c_int, eventlist: *mut kevent,
