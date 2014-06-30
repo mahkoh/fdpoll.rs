@@ -25,7 +25,7 @@ struct epoll_data {
 }
 
 impl epoll_data {
-    fn fd(&self) -> *c_int {
+    fn fd(&self) -> *const c_int {
         unsafe { transmute(self) }
     }
 
@@ -73,11 +73,11 @@ pub enum Error {
 /// Watch types.
 pub enum Type {
     /// Wait for the descriptor to become read-ready.
-    Read = EPOLLIN,
+    Read = EPOLLIN as int,
     /// Wait for the descriptor to become write-ready.
-    Write = EPOLLOUT,
+    Write = EPOLLOUT as int,
     /// Wait for the descriptor to become write- or read-ready.
-    ReadWrite = EPOLLIN | EPOLLOUT,
+    ReadWrite = EPOLLIN as int | EPOLLOUT as int,
 }
 
 /// A single event.
@@ -221,7 +221,7 @@ impl FDPoll {
         }
         unsafe {
             let buf = 1u64;
-            write(self.abort.fd, &buf as *_ as *_, 8);
+            write(self.abort.fd, &buf as *const _ as *const _, 8);
         }
         Ok(())
     }

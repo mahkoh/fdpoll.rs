@@ -41,8 +41,8 @@ struct kevent {
 #[link(name="kqueue")]
 extern {
     fn kqueue() -> c_int;
-    fn kevent(kq: c_int, changelist: *kevent, nchanges: c_int, eventlist: *mut kevent,
-              nevents: c_int, timeout: *timespec) -> c_int;
+    fn kevent(kq: c_int, changelist: *const kevent, nchanges: c_int,
+              eventlist: *mut kevent, nevents: c_int, timeout: *const timespec) -> c_int;
     fn pipe2(filedes: *mut [c_int, ..2], flags: c_int) -> c_int;
 }
 
@@ -51,8 +51,8 @@ extern {
 #[cfg(target_os = "freebsd")]
 extern {
     fn kqueue() -> c_int;
-    fn kevent(kq: c_int, changelist: *kevent, nchanges: c_int, eventlist: *mut kevent,
-              nevents: c_int, timeout: *timespec) -> c_int;
+    fn kevent(kq: c_int, changelist: *const kevent, nchanges: c_int,
+              eventlist: *mut kevent, nevents: c_int, timeout: *const timespec) -> c_int;
     fn pipe2(filedes: *mut [c_int, ..2], flags: c_int) -> c_int;
 }
 
@@ -172,7 +172,7 @@ impl FDPoll {
         e.ident = read_end.fd as uintptr_t;
         e.filter = EVFILT_READ;
         e.flags = EV_ADD;
-        if unsafe { kevent(epfd.fd, &e as *_, 1, 0 as *mut _, 0, 0 as *_) == -1 } {
+        if unsafe { kevent(epfd.fd, &e as *const _, 1, 0 as *mut _, 0, 0 as *const _) == -1 } {
             return Err(Resources);
         }
 
@@ -197,8 +197,8 @@ impl FDPoll {
                 let mut events2 = events2.write();
                 unsafe { events2.set_len(0); }
                 let r = unsafe {
-                    kevent(epfd2, 0 as *_, 0, events2.as_mut_ptr(),
-                           events2.capacity() as c_int, 0 as *_)
+                    kevent(epfd2, 0 as *const _, 0, events2.as_mut_ptr(),
+                           events2.capacity() as c_int, 0 as *const _)
                 };
                 running2.store(false, Relaxed);
                 match r {
@@ -237,7 +237,7 @@ impl FDPoll {
         }
         unsafe {
             let buf = [0u8];
-            write(self.abort.fd, buf.as_ptr() as *_, 1);
+            write(self.abort.fd, buf.as_ptr() as *const _, 1);
         }
         Ok(())
     }
@@ -284,7 +284,7 @@ impl FDPoll {
                 ReadWrite => (e.as_ptr(),           2),
             }
         };
-        match unsafe { kevent(self.epfd.fd, ptr, len, 0 as *mut _, 0, 0 as *_) } {
+        match unsafe { kevent(self.epfd.fd, ptr, len, 0 as *mut _, 0, 0 as *const _) } {
             -1 => {
                 match errno() as i32 {
                     EBADF => Err(BadFD),
@@ -315,7 +315,7 @@ impl FDPoll {
         e[0].ident = fd as uintptr_t;
         e[0].filter = EVFILT_READ;
         e[0].flags = EV_DELETE;
-        match unsafe { kevent(self.epfd.fd, e.as_ptr(), 1, 0 as *mut _, 0, 0 as *_) } {
+        match unsafe { kevent(self.epfd.fd, e.as_ptr(), 1, 0 as *mut _, 0, 0 as *const _) } {
             -1 => match errno() as i32 {
                 EBADF => return Err(BadFD),
                 ENOENT => not_found = true,
@@ -324,7 +324,7 @@ impl FDPoll {
             _ => { },
         }
         e[0].filter = EVFILT_WRITE;
-        match unsafe { kevent(self.epfd.fd, e.as_ptr(), 1, 0 as *mut _, 0, 0 as *_) } {
+        match unsafe { kevent(self.epfd.fd, e.as_ptr(), 1, 0 as *mut _, 0, 0 as *const _) } {
             -1 => match errno() as i32 {
                 EBADF => Err(BadFD),
                 ENOENT if not_found => Err(DoesntExist),
