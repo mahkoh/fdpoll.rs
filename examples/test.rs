@@ -29,12 +29,12 @@ fn main() {
                 if e.fd() == fds[1] {
                     fdpoll.delete(fds[1]).unwrap();
                     fdpoll.add(0, Read).unwrap();
-                    unsafe { libc::write(fds[1], b"huhu".as_ptr() as *_, 4); } 
+                    unsafe { libc::write(fds[1], b"huhu".as_ptr() as *const _, 4); }
                 }
                 if e.fd() == fds[0] {
-                    let mut buf = [0, 0, 0, 0, 0];
+                    let mut buf = [0u8, 0, 0, 0, 0];
                     unsafe { libc::read(fds[0], buf.as_mut_ptr() as *mut _, 4); }
-                    unsafe { libc::puts(buf.as_ptr() as *_); }
+                    unsafe { libc::puts(buf.as_ptr() as *const _); }
                 }
             }
             fdpoll.wait().unwrap();
