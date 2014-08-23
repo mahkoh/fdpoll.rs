@@ -30,7 +30,7 @@
 //! ```
 //! This should always print `fd: 0 read: true write: false` when the user inputs a line.
 
-#![crate_id = "fdpoll"]
+#![crate_name = "fdpoll"]
 #![crate_type = "lib"]
 #![feature(globs)]
 

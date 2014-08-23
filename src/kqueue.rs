@@ -193,7 +193,6 @@ impl FDPoll {
                 if stop2.load(Relaxed) {
                     break;
                 }
-                running2.store(true, Relaxed);
                 let mut events2 = events2.write();
                 unsafe { events2.set_len(0); }
                 let r = unsafe {
@@ -202,7 +201,7 @@ impl FDPoll {
                 };
                 running2.store(false, Relaxed);
                 match r {
-                    -1 => snd.send(Err(Signal)),
+                    -1 => snd.send_opt(Err(Signal)).ok(),
                     n => {
                         unsafe { events2.set_len(n as uint); }
                         let mut buf: [u8, ..8] = unsafe { uninitialized() };
@@ -256,7 +255,7 @@ impl FDPoll {
     ///
     /// Returns `Err` if `wait()` is currently running.
     pub fn wait(&self) -> Result<(), ()> {
-        if self.running.load(Relaxed) {
+        if self.running.compare_and_swap(false, true, Relaxed) {
             return Err(());
         }
         self.sem.release();
